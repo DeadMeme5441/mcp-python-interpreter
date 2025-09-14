@@ -48,7 +48,7 @@ print(f"System-wide file access: {'ENABLED' if ALLOW_SYSTEM_ACCESS else 'DISABLE
 # Create our MCP server
 mcp = FastMCP(
     "Python Interpreter",
-    description=f"Execute Python code, access Python environments, and manage Python files{' system-wide' if ALLOW_SYSTEM_ACCESS else f' in directory: {WORKING_DIR}'}",
+    instructions=f"Execute Python code, access Python environments, and manage Python files{' system-wide' if ALLOW_SYSTEM_ACCESS else f' in directory: {WORKING_DIR}'}",
     dependencies=["mcp[cli]"]
 )
 
@@ -197,23 +197,25 @@ def execute_python_code(
         except Exception:
             pass
 
-def find_python_files(directory: str or Path) -> List[Dict[str, str]]:
-    """Find all Python files in a directory and its subdirectories."""
-    files = []
-    
+def find_files(directory: str | Path) -> List[Dict[str, Any]]:
+    """Find all files in a directory and its subdirectories."""
+    files: List[Dict[str, Any]] = []
+
     directory_path = Path(directory)
     if not directory_path.exists():
         return files  # Return empty list instead of throwing error
-    
-    for path in directory_path.rglob("*.py"):
+
+    for path in directory_path.rglob("*"):
         if path.is_file():
-            files.append({
-                "path": str(path),
-                "name": path.name,
-                "size": path.stat().st_size,
-                "modified": path.stat().st_mtime
-            })
-    
+            files.append(
+                {
+                    "path": str(path),
+                    "name": path.name,
+                    "size": path.stat().st_size,
+                    "modified": path.stat().st_mtime,
+                }
+            )
+
     return files
 
 # ============================================================================
@@ -241,8 +243,8 @@ def get_packages_resource(env_name: str) -> str:
 
 @mcp.resource("python://file")
 def get_file_in_current_dir() -> str:
-    """List Python files in the current working directory."""
-    files = find_python_files(WORKING_DIR)
+    """List files in the current working directory."""
+    files = find_files(WORKING_DIR)
     return json.dumps(files, indent=2)
 
 @mcp.tool()
@@ -357,9 +359,9 @@ def write_file(
 
 @mcp.resource("python://directory")
 def get_working_directory_listing() -> str:
-    """List all Python files in the working directory as a resource."""
+    """List all files in the working directory as a resource."""
     try:
-        files = find_python_files(WORKING_DIR)
+        files = find_files(WORKING_DIR)
         return json.dumps({
             "working_directory": str(WORKING_DIR),
             "files": files
@@ -370,8 +372,8 @@ def get_working_directory_listing() -> str:
 @mcp.tool()
 def list_directory(directory_path: str = "") -> str:
     """
-    List all Python files in a directory or subdirectory.
-    
+    List files in a directory or subdirectory.
+
     Args:
         directory_path: Path to directory (relative to working directory or absolute, empty for working directory)
     """
@@ -396,12 +398,12 @@ def list_directory(directory_path: str = "") -> str:
         if not path.is_dir():
             return f"Error: '{directory_path}' is not a directory"
             
-        files = find_python_files(path)
-        
+        files = find_files(path)
+
         if not files:
-            return f"No Python files found in {directory_path or 'working directory'}"
-            
-        result = f"Python files in directory: {directory_path or str(WORKING_DIR)}\n\n"
+            return f"No files found in {directory_path or 'working directory'}"
+
+        result = f"Files in directory: {directory_path or str(WORKING_DIR)}\n\n"
         
         # Group files by subdirectory for better organization
         files_by_dir = {}
@@ -501,6 +503,7 @@ def run_python_code(
 ) -> str:
     """
     Execute Python code and return the result. Code runs in the working directory.
+    Any files created in the working directory are listed in the output.
     
     Args:
         code: Python code to execute
@@ -533,9 +536,21 @@ def run_python_code(
         except Exception as e:
             return f"Error saving code to file: {str(e)}"
     
+    # Track files before execution
+    before_files = {
+        Path(f["path"]).relative_to(WORKING_DIR) for f in find_files(WORKING_DIR)
+    }
+
     # Execute the code
     result = execute_python_code(code, env["path"], WORKING_DIR)
-    
+
+    # Track files after execution
+    after_files = {
+        Path(f["path"]).relative_to(WORKING_DIR) for f in find_files(WORKING_DIR)
+    }
+
+    new_files = sorted(str(p) for p in after_files - before_files)
+
     output = f"Execution in '{environment}' environment"
     if save_as:
         output += f" (saved to {save_as})"
@@ -557,7 +572,12 @@ def run_python_code(
         if result["stdout"]:
             output += "\n--- Output ---\n"
             output += result["stdout"]
-    
+
+    if new_files:
+        output += "\n--- Created files ---\n"
+        for f in new_files:
+            output += f"- {f}\n"
+
     return output
 
 @mcp.tool()
@@ -650,7 +670,8 @@ def run_python_file(
     arguments: Optional[List[str]] = None
 ) -> str:
     """
-    Execute a Python file and return the result.
+    Execute a Python file and return the result. Any files created in the working
+    directory are listed in the output.
     
     Args:
         file_path: Path to the Python file to execute (relative to working directory or absolute if system access is enabled)
@@ -683,22 +704,32 @@ def run_python_file(
     
     # Build the command
     cmd = [env["path"], str(path)]
-    
+
     if arguments:
         cmd.extend(arguments)
-    
+
     try:
+        before_files = {
+            Path(f["path"]).relative_to(WORKING_DIR) for f in find_files(WORKING_DIR)
+        }
+
         # Run the command with working directory set properly
         result = subprocess.run(
-            cmd, 
-            capture_output=True, 
-            text=True, 
+            cmd,
+            capture_output=True,
+            text=True,
             check=False,
             cwd=WORKING_DIR
         )
-        
+
+        after_files = {
+            Path(f["path"]).relative_to(WORKING_DIR) for f in find_files(WORKING_DIR)
+        }
+
+        new_files = sorted(str(p) for p in after_files - before_files)
+
         output = f"Execution of '{path}' in '{environment}' environment:\n\n"
-        
+
         if result.returncode == 0:
             output += "--- Output ---\n"
             if result.stdout:
@@ -711,11 +742,16 @@ def run_python_file(
                 output += result.stderr
             else:
                 output += "(No error message)\n"
-            
+
             if result.stdout:
                 output += "\n--- Output ---\n"
                 output += result.stdout
-        
+
+        if new_files:
+            output += "\n--- Created files ---\n"
+            for f in new_files:
+                output += f"- {f}\n"
+
         return output
     except Exception as e:
         return f"Error executing file: {str(e)}"
